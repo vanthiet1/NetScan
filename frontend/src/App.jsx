@@ -94,11 +94,9 @@ const App = () => {
   const [newlyDetected, setNewlyDetected] = useState([]);
   const [selectedDevice, setSelectedDevice] = useState(null);
 
-  // Group 1 State
-  const [subnet, setSubnet] = useState("192.168.1");
-  const [rangeStart, setRangeStart] = useState(1);
-  const [rangeEnd, setRangeEnd] = useState(254);
+  // Progress State (hidden since scans are fast now)
   const [progress, setProgress] = useState({ current: 0, total: 0, percent: 0 });
+
 
   // Group 3 State
   const [autoScan, setAutoScan] = useState(false);
@@ -122,8 +120,8 @@ const App = () => {
           setError("Ứng dụng đang mở trên trình duyệt web nên không có quyền truy cập hệ thống. Vui lòng xem cửa sổ phần mềm NetScan Pro (Electron) vừa được mở lên.");
           return;
         }
-        const info = await window.electronAPI.getLocalInfo();
-        if (info && info.subnet) setSubnet(info.subnet);
+        // Subnet auto-detection is now handled on the backend automatically
+
 
         const savedNames = await window.electronAPI.storeGet('customNames');
         if (savedNames) setCustomNames(savedNames);
@@ -146,6 +144,22 @@ const App = () => {
       window.electronAPI.onScanProgress((data) => {
         setProgress(data);
       });
+
+      // Real-time background update listener
+      window.electronAPI.onNetworkUpdate((data) => {
+        console.log('[App] Real-time network update received:', data.devices.length);
+        setDevices(prev => {
+          // Merge logic: preserve enrichment data for existing devices
+          return data.devices.map(newDevice => {
+            const existing = prev.find(d => d.mac === newDevice.mac);
+            if (existing) {
+              return { ...newDevice, ...existing, online: true };
+            }
+            return { ...newDevice, online: true };
+          });
+        });
+        setLastScanTime(new Date().toLocaleTimeString());
+      });
     }
   }, []);
 
@@ -153,13 +167,9 @@ const App = () => {
     if (loading) return;
     setLoading(true);
     setError(null);
-    setProgress({ current: 0, total: rangeEnd - rangeStart + 1, percent: 0 });
     try {
-      const data = await window.electronAPI.scanNetwork({
-        subnet,
-        start: parseInt(rangeStart),
-        end: parseInt(rangeEnd)
-      });
+      const data = await window.electronAPI.scanNetwork();
+
 
       if (data.success) {
         const currentMacs = data.devices.map(d => d.mac);
@@ -438,15 +448,17 @@ const App = () => {
             Thông báo: {enableNotifications ? 'BẬT' : 'TẮT'}
           </div>
         </section>
+
         {loading && (
-          <section className="progress-section">
-            <div className="progress-info">
-              <span>Đang quét: {progress.current} / {progress.total} IP</span>
+          <section className="progress-section" style={{ marginBottom: '1.5rem' }}>
+            <div className="progress-info" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', fontSize: '0.85rem' }}>
+              <span>Đang khám phá thiết bị: {progress.current} / {progress.total} IP</span>
               <span>{progress.percent}%</span>
             </div>
-            <div className="progress-bar-bg">
+            <div className="progress-bar-bg" style={{ height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '10px', overflow: 'hidden' }}>
               <motion.div
                 className="progress-bar-fill"
+                style={{ height: '100%', background: 'linear-gradient(90deg, #6366f1, #a855f7)' }}
                 initial={{ width: 0 }}
                 animate={{ width: `${progress.percent}%` }}
               />
@@ -455,39 +467,12 @@ const App = () => {
         )}
 
         <section className="controls-panel">
-          <div className="scan-inputs">
-            <div className="input-group">
-              <label>Subnet</label>
-              <input
-                type="text"
-                value={subnet}
-                onChange={(e) => setSubnet(e.target.value)}
-                placeholder="192.168.1"
-              />
-            </div>
-            <div className="input-group">
-              <label>Bắt đầu</label>
-              <input
-                type="number"
-                value={rangeStart}
-                onChange={(e) => setRangeStart(e.target.value)}
-              />
-            </div>
-            <div className="input-group">
-              <label>Kết thúc</label>
-              <input
-                type="number"
-                value={rangeEnd}
-                onChange={(e) => setRangeEnd(e.target.value)}
-              />
-            </div>
-          </div>
 
-          <div className="search-wrapper">
+          <div className="search-wrapper" style={{ width: '100%', maxWidth: 'none' }}>
             <Search className="search-icon" size={18} />
             <input
               type="text"
-              placeholder="Tìm kiếm theo IP, MAC, Vendor..."
+              placeholder="Tìm kiếm nhanh thiết bị (IP, MAC, Tên, Vendor)..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
             />
@@ -495,6 +480,7 @@ const App = () => {
         </section>
 
         <section className="stats-row">
+
           <div className="stat-card">
             <div className="stat-icon">
               <Activity size={20} />

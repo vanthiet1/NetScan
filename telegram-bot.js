@@ -1,10 +1,13 @@
 const TelegramBot = require('node-telegram-bot-api');
 const tracker = require('./device-tracker');
 
-const BOT_TOKEN = '8615397892:AAEdL8pi8SbwjndlF4a5c5RUxaKPsNKpmh8';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+
+const Store = require('electron-store');
+const store = new Store();
 
 let bot;
-const chatIds = new Set();
+const chatIds = new Set(store.get('telegram_chat_ids', []));
 
 // --- Helpers ---
 
@@ -122,40 +125,81 @@ async function buildOnlineMsg() {
     return msg;
 }
 
+async function buildStatsReport(days = 7) {
+    const stats = await tracker.getUsageStats(days);
+    if (!stats) return '❌ Không thể kết nối database.';
+
+    if (stats.length === 0) {
+        return `📊 <b>Thống kê ${days} ngày qua</b>\n<i>Chưa có dữ liệu.</i>`;
+    }
+
+    let msg = `📊 <b>Thống Kê Sử Dụng (${days} ngày qua)</b>\n`;
+    msg += `━━━━━━━━━━━━━━━━━━\n`;
+
+    for (let i = 0; i < Math.min(stats.length, 15); i++) {
+        const s = stats[i];
+        const name = esc(s.name);
+        msg += `\n${i + 1}. <b>${name}</b>\n`;
+        msg += `   ⏱️ Tổng: <b>${fmt(s.totalDuration)}</b> (${s.sessionCount} lần)\n`;
+        msg += `   📍 IP: <code>${s.ip}</code>\n`;
+    }
+
+    return msg;
+}
+
 // --- Bot setup ---
+
 
 function start() {
     try {
         bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
         bot.onText(/\/start/, (msg) => {
-            chatIds.add(msg.chat.id);
-            bot.sendMessage(msg.chat.id,
-                '🎉 <b>Chào mừng đến NetScan Pro Bot!</b>\n\n' +
-                'Các lệnh khả dụng:\n' +
-                '📊 /report - Xem báo cáo hôm nay\n' +
-                '🟢 /online - Xem thiết bị đang online\n\n' +
-                '<i>Bot sẽ gửi báo cáo tự động hằng ngày lúc 22:00.</i>',
-                { parse_mode: 'HTML' }
-            );
+            const chatId = msg.chat.id;
+            if (!chatIds.has(chatId)) {
+                chatIds.add(chatId);
+                store.set('telegram_chat_ids', Array.from(chatIds));
+            }
+            
+            bot.sendMessage(chatId, "🚀 <b>NetScan Pro Bot</b> đã sẵn sàng!\n\nTôi sẽ thông báo cho bạn ngay khi có thiết bị mới kết nối vào mạng.\n\nCác lệnh khả dụng:\n/stats - Thống kê sử dụng 7 ngày\n/online - Các thiết bị đang online\n/report - Báo cáo hoạt động hôm nay\n/test - Kiểm tra kết nối", { parse_mode: 'HTML' });
+        });
+
+        bot.onText(/\/test/, (msg) => {
+            bot.sendMessage(msg.chat.id, "✅ Kết nối tới Bot Telegram thành công! Hệ thống cảnh báo đang hoạt động.");
         });
 
         bot.onText(/\/report/, async (msg) => {
             chatIds.add(msg.chat.id);
+            store.set('telegram_chat_ids', Array.from(chatIds));
             const text = await buildDailyReport();
             bot.sendMessage(msg.chat.id, text, { parse_mode: 'HTML' });
         });
 
         bot.onText(/\/online/, async (msg) => {
             chatIds.add(msg.chat.id);
+            store.set('telegram_chat_ids', Array.from(chatIds));
             const text = await buildOnlineMsg();
+            bot.sendMessage(msg.chat.id, text, { parse_mode: 'HTML' });
+        });
+
+        bot.onText(/\/stats/, async (msg) => {
+            chatIds.add(msg.chat.id);
+            store.set('telegram_chat_ids', Array.from(chatIds));
+            const text = await buildStatsReport(7);
             bot.sendMessage(msg.chat.id, text, { parse_mode: 'HTML' });
         });
 
         // Daily report at 22:00 Vietnam time (UTC+7)
         scheduleDailyReport();
 
-        console.log('[TelegramBot] Started');
+        // Notify startup
+        if (chatIds.size > 0) {
+            for (const id of chatIds) {
+                bot.sendMessage(id, "🔔 <b>Hệ thống giám sát NetScan Pro đã khởi động.</b>\nCảnh báo Real-time đang hoạt động...", { parse_mode: 'HTML' }).catch(() => {});
+            }
+        }
+
+        console.log(`[TelegramBot] Started with ${chatIds.size} users`);
     } catch (err) {
         console.error('[TelegramBot] Error:', err.message);
     }
@@ -190,8 +234,29 @@ async function sendReportToAll() {
     }
 }
 
+async function sendAlert(device, type) {
+    if (chatIds.size === 0 || !bot) return;
+    
+    const icon = type === 'online' ? '🟢' : '🔴';
+    const title = type === 'online' ? 'Thiết bị vừa kết nối' : 'Thiết bị đã ngắt kết nối';
+    const name = esc(device.name || device.ip);
+    
+    let msg = `${icon} <b>${title}</b>\n`;
+    msg += `━━━━━━━━━━━━━━━━━━\n`;
+    msg += `👤 Tên: <b>${name}</b>\n`;
+    msg += `📍 IP: <code>${device.ip}</code>\n`;
+    if (device.mac) msg += `🔗 MAC: <code>${device.mac}</code>\n`;
+    msg += `⏰ Thời gian: ${new Date().toLocaleTimeString('vi-VN')}\n`;
+
+    for (const id of chatIds) {
+        try {
+            await bot.sendMessage(id, msg, { parse_mode: 'HTML' });
+        } catch (err) {}
+    }
+}
+
 function stop() {
     if (bot) bot.stopPolling();
 }
 
-module.exports = { start, stop };
+module.exports = { start, stop, sendAlert };

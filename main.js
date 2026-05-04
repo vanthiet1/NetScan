@@ -1,5 +1,7 @@
 const { app, BrowserWindow, ipcMain, Notification } = require('electron');
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, 'backend', '.env') });
+
 const axios = require('axios');
 const net = require('net');
 const pLimit = require('p-limit');
@@ -12,6 +14,8 @@ const Store = require('electron-store');
 const fs = require('fs');
 const deviceTracker = require('./device-tracker');
 const telegramBot = require('./telegram-bot');
+const findDevices = require('local-devices');
+
 
 const store = new Store();
 const limit = pLimit(20); // Concurrency = 20
@@ -20,6 +24,43 @@ const bonjourNames = {};
 
 let mainWindow;
 let isScanning = false;
+let backgroundScanInterval;
+
+async function performBackgroundScan() {
+    if (isScanning) return;
+    
+    console.log('[App] Performing background scan for tracking...');
+    try {
+        // Use local-devices (ARP scan) - much faster and more accurate than pinging 254 IPs
+        const discovered = await findDevices();
+        const devices = discovered.map(d => ({
+            ip: d.ip,
+            mac: d.mac,
+            name: (!d.name || d.name === '?') ? d.ip : d.name,
+            online: true
+        }));
+        
+        // Update tracker and get changes
+        deviceTracker.updateDevices(devices).then(changes => {
+            if (changes) {
+                changes.cameOnline.forEach(d => telegramBot.sendAlert(d, 'online'));
+                changes.wentOffline.forEach(d => telegramBot.sendAlert(d, 'offline'));
+            }
+        }).catch(err => {
+            console.error('[Tracker] Background update error:', err.message);
+        });
+
+        // Notify UI for real-time updates
+        if (mainWindow) {
+            mainWindow.webContents.send('network-update', { devices });
+        }
+        
+        console.log(`[App] Background scan complete. Found ${devices.length} devices.`);
+    } catch (err) {
+        console.error('[App] Background scan failed:', err.message);
+    }
+}
+
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -211,44 +252,34 @@ ipcMain.handle('get-local-info', () => {
     return getLocalSubnet();
 });
 
-ipcMain.handle('scan-network', async (event, { subnet, start = 1, end = 254 }) => {
+ipcMain.handle('scan-network', async (event) => {
     if (isScanning) return { success: false, error: 'Scan already in progress' };
     isScanning = true;
     
+    const { subnet } = getLocalSubnet();
     const devices = [];
+    const start = 1;
+    const end = 254;
     const total = end - start + 1;
     let processed = 0;
+
+    console.log(`[App] Starting manual scan with progress on ${subnet}.0/24`);
 
     const scanIp = async (ip) => {
         if (!isScanning) return;
         try {
-            // ICMP Ping first
             const res = await ping.promise.probe(ip, { timeout: 1.5 });
-            
-            let isOnline = res.alive;
-            let latency = res.time !== 'unknown' ? parseFloat(res.time) : null;
-
-            // Fallback to TCP port 80 if ICMP blocked
-            if (!isOnline) {
-                const tcp80 = await checkPort(ip, 80);
-                if (tcp80) {
-                    isOnline = true;
-                    latency = 10; // Dummy latency for TCP fallback
-                }
-            }
-
-            if (isOnline) {
+            if (res.alive) {
                 const mac = await getMacAddress(ip);
                 devices.push({
                     ip,
                     mac,
-                    name: ip, // Default name is IP, will be enriched
-                    latency,
+                    name: ip,
+                    latency: res.time !== 'unknown' ? parseFloat(res.time) : 0,
                     online: true
                 });
             }
         } catch (e) {
-            // Ignore errors for individual IPs
         } finally {
             processed++;
             if (mainWindow) {
@@ -270,8 +301,13 @@ ipcMain.handle('scan-network', async (event, { subnet, start = 1, end = 254 }) =
     await Promise.all(tasks);
     isScanning = false;
 
-    // Track devices in MongoDB for Telegram reports
-    deviceTracker.updateDevices(devices).catch(err => {
+    // Track devices and get changes for alerts
+    deviceTracker.updateDevices(devices).then(changes => {
+        if (changes) {
+            changes.cameOnline.forEach(d => telegramBot.sendAlert(d, 'online'));
+            changes.wentOffline.forEach(d => telegramBot.sendAlert(d, 'offline'));
+        }
+    }).catch(err => {
         console.error('[Tracker] Update error:', err.message);
     });
 
@@ -375,17 +411,23 @@ ipcMain.handle('get-device-info', async (event, { ip, mac, name }) => {
 app.whenReady().then(async () => {
     createWindow();
 
-    // Start MongoDB tracker & Telegram bot
+    // Start MongoDB tracker (async, don't block)
     const dbOk = await deviceTracker.connect();
-    if (dbOk) {
-        telegramBot.start();
-        console.log('[App] Telegram bot & tracker started');
-    } else {
-        console.warn('[App] MongoDB failed - Telegram reports disabled');
+    if (!dbOk) {
+        console.warn('[App] MongoDB failed - Usage history will not be saved, but real-time alerts are ACTIVE');
     }
+
+    // Always start Telegram bot and background scanning
+    telegramBot.start();
+    console.log('[App] Telegram bot started');
+    
+    // Start background scanning for tracking (every 1 minute)
+    performBackgroundScan(); // Run once immediately
+    backgroundScanInterval = setInterval(performBackgroundScan, 1 * 60 * 1000);
 });
 
 app.on('window-all-closed', () => {
     telegramBot.stop();
+    if (backgroundScanInterval) clearInterval(backgroundScanInterval);
     if (process.platform !== 'darwin') app.quit();
 });
