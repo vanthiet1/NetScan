@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const MONGO_URI = 'mongodb+srv://vanthietfrontend_db_user:V1dWJCbW7dVZINF5@netscan.evwulcm.mongodb.net/netscan?appName=netscan';
+const MONGO_URI = process.env.MONGODB_URI;
 
 // --- Schemas ---
 
@@ -53,6 +53,7 @@ async function connect() {
 
 // In-memory state for real-time tracking (independent of MongoDB)
 const memoryState = new Map();
+let isInitialRun = true;
 
 async function updateDevices(onlineDevices) {
     const now = new Date();
@@ -62,11 +63,13 @@ async function updateDevices(onlineDevices) {
     const cameOnline = [];
     const wentOffline = [];
 
-    // --- Detect Changes (In-Memory) ---
+    // --- 1. Detect Changes (In-Memory) ---
     for (const device of onlineDevices) {
-        if (!memoryState.has(device.ip) || !memoryState.get(device.ip).isOnline) {
+        const prevState = memoryState.get(device.ip);
+        if (prevState && !prevState.isOnline) {
             cameOnline.push({ ...device, name: device.name || device.ip });
         }
+        
         memoryState.set(device.ip, { 
             isOnline: true, 
             lastSeen: now, 
@@ -82,7 +85,7 @@ async function updateDevices(onlineDevices) {
         }
     }
 
-    // --- Database Logging (Only if connected) ---
+    // --- 2. Database Logging (Only if connected) ---
     if (connected) {
         try {
             // Devices that came online: Start sessions
@@ -134,7 +137,15 @@ async function updateDevices(onlineDevices) {
         }
     }
 
-    return { cameOnline, wentOffline };
+    // --- 3. Return results (Suppress if initial run) ---
+    const result = { cameOnline, wentOffline };
+
+    if (isInitialRun) {
+        isInitialRun = false;
+        return { cameOnline: [], wentOffline: [] };
+    }
+
+    return result;
 }
 
 async function updateDeviceName(ip, name) {

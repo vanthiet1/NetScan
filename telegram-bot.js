@@ -1,5 +1,8 @@
 const TelegramBot = require('node-telegram-bot-api');
 const tracker = require('./device-tracker');
+const fs = require('fs');
+const path = require('path');
+const { exec } = require('child_process');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -10,6 +13,47 @@ let bot;
 const chatIds = new Set(store.get('telegram_chat_ids', []));
 
 // --- Helpers ---
+
+function getVendor(mac) {
+    if (!mac || mac === '00:00:00:00:00:00' || mac === 'Unknown') return 'Không xác định';
+    try {
+        const ouiPath = path.join(__dirname, 'oui.json');
+        if (fs.existsSync(ouiPath)) {
+            const ouiData = JSON.parse(fs.readFileSync(ouiPath, 'utf8'));
+            const prefix = mac.substring(0, 8).toUpperCase();
+            if (ouiData[prefix]) return ouiData[prefix];
+        }
+    } catch (e) { }
+    return 'Không xác định';
+}
+
+function guessOS(ip) {
+    return new Promise((resolve) => {
+        const command = process.platform === 'win32' ? `ping -n 1 -w 1000 ${ip}` : `ping -c 1 -W 1 ${ip}`;
+        exec(command, (error, stdout) => {
+            if (error) return resolve('Unknown');
+            const ttlMatch = stdout.match(/TTL=(\d+)/i) || stdout.match(/ttl=(\d+)/i);
+            if (ttlMatch) {
+                const ttl = parseInt(ttlMatch[1]);
+                if (ttl <= 64) return resolve('Linux/Android/iOS');
+                if (ttl <= 128) return resolve('Windows');
+                if (ttl <= 255) return resolve('Network Gear');
+            }
+            resolve('Unknown');
+        });
+    });
+}
+
+function guessDeviceType(vendor) {
+    if (!vendor || vendor === 'Không xác định') return 'PC/Other';
+    const lowerVendor = vendor.toLowerCase();
+    if (lowerVendor.includes('apple')) return 'Mac/iPhone';
+    if (lowerVendor.includes('samsung') || lowerVendor.includes('huawei') || lowerVendor.includes('xiaomi') || lowerVendor.includes('oppo') || lowerVendor.includes('vivo')) return 'Mobile';
+    if (lowerVendor.includes('cisco') || lowerVendor.includes('tp-link') || lowerVendor.includes('ubiquiti') || lowerVendor.includes('mikrotik') || lowerVendor.includes('d-link') || lowerVendor.includes('netgear') || lowerVendor.includes('vietnam post')) return 'Router/Network Gear';
+    if (lowerVendor.includes('hp') || lowerVendor.includes('canon') || lowerVendor.includes('epson') || lowerVendor.includes('brother')) return 'Máy in (Printer)';
+    if (lowerVendor.includes('sony') || lowerVendor.includes('lg') || lowerVendor.includes('panasonic') || lowerVendor.includes('hikvision') || lowerVendor.includes('dahua')) return 'Media/Camera';
+    return 'PC/Other';
+}
 
 function fmt(seconds) {
     if (!seconds || seconds <= 0) return '0 phút';
@@ -160,7 +204,7 @@ function start() {
                 chatIds.add(chatId);
                 store.set('telegram_chat_ids', Array.from(chatIds));
             }
-            
+
             bot.sendMessage(chatId, "🚀 <b>NetScan Pro Bot</b> đã sẵn sàng!\n\nTôi sẽ thông báo cho bạn ngay khi có thiết bị mới kết nối vào mạng.\n\nCác lệnh khả dụng:\n/stats - Thống kê sử dụng 7 ngày\n/online - Các thiết bị đang online\n/report - Báo cáo hoạt động hôm nay\n/test - Kiểm tra kết nối", { parse_mode: 'HTML' });
         });
 
@@ -195,7 +239,7 @@ function start() {
         // Notify startup
         if (chatIds.size > 0) {
             for (const id of chatIds) {
-                bot.sendMessage(id, "🔔 <b>Hệ thống giám sát NetScan Pro đã khởi động.</b>\nCảnh báo Real-time đang hoạt động...", { parse_mode: 'HTML' }).catch(() => {});
+                bot.sendMessage(id, "🔔 <b>Hệ thống giám sát NetScan Pro đã khởi động.</b>\nCảnh báo Real-time đang hoạt động...", { parse_mode: 'HTML' }).catch(() => { });
             }
         }
 
@@ -236,11 +280,14 @@ async function sendReportToAll() {
 
 async function sendAlert(device, type) {
     if (chatIds.size === 0 || !bot) return;
-    
+
     const icon = type === 'online' ? '🟢' : '🔴';
     const title = type === 'online' ? 'Thiết bị vừa kết nối' : 'Thiết bị đã ngắt kết nối';
-    const name = esc(device.name || device.ip);
-    
+
+    const customNames = store.get('customNames', {});
+    const nameStr = customNames[device.mac] || (device.name && device.name !== '?' && device.name !== device.ip ? device.name : `Thiết bị ${device.ip}`);
+    const name = esc(nameStr);
+
     let msg = `${icon} <b>${title}</b>\n`;
     msg += `━━━━━━━━━━━━━━━━━━\n`;
     msg += `👤 Tên: <b>${name}</b>\n`;
@@ -251,7 +298,77 @@ async function sendAlert(device, type) {
     for (const id of chatIds) {
         try {
             await bot.sendMessage(id, msg, { parse_mode: 'HTML' });
-        } catch (err) {}
+        } catch (err) { }
+    }
+}
+
+async function sendScanReport(devices) {
+    if (chatIds.size === 0 || !bot) return;
+
+    let headerMsg = `🔍 <b>Kết Quả Quét Mạng Tổng Hợp</b>\n`;
+    headerMsg += `━━━━━━━━━━━━━━━━━━\n`;
+    headerMsg += `📱 Tổng số thiết bị: <b>${devices.length}</b>\n`;
+
+    // Thống kê lịch sử trong ngày
+    let historyStats = {};
+    const reportData = await tracker.getTodayReport();
+    if (reportData && reportData.sessions) {
+        reportData.sessions.forEach(s => {
+            if (!historyStats[s.ip]) historyStats[s.ip] = 0;
+            historyStats[s.ip] += s.duration;
+            if (!s.offlineAt) {
+                historyStats[s.ip] += Math.round((Date.now() - new Date(s.onlineAt).getTime()) / 1000);
+            }
+        });
+    }
+
+    if (!reportData) {
+        headerMsg += `\n⚠️ <i>Lịch sử không khả dụng (Lỗi MongoDB).</i>`;
+    }
+
+    for (const id of chatIds) {
+        try {
+            await bot.sendMessage(id, headerMsg, { parse_mode: 'HTML' });
+        } catch (err) { }
+    }
+
+    const CHUNK_SIZE = 8; // Small chunks for table readability
+    const customNames = store.get('customNames', {});
+
+    for (let i = 0; i < devices.length; i += CHUNK_SIZE) {
+        const chunk = devices.slice(i, i + CHUNK_SIZE);
+        let msg = `<pre>`;
+        msg += `STT | IP      | TÊN & HĐH\n`;
+        msg += `----|---------|------------------\n`;
+        
+        for (let j = 0; j < chunk.length; j++) {
+            const d = chunk[j];
+            const idx = (i + j + 1).toString().padEnd(3);
+            const ipTail = d.ip.split('.').pop().padEnd(7);
+            const name = (customNames[d.mac] || d.name || d.ip).substring(0, 12);
+            const os = (d.os || '??').substring(0, 4);
+            
+            msg += `${idx}| .${ipTail}| ${name} (${os})\n`;
+        }
+        msg += `</pre>\n`;
+        
+        // Detailed cards for the same chunk
+        msg += `<b>Chi tiết nhóm ${Math.floor(i/CHUNK_SIZE) + 1}:</b>\n`;
+        for (let j = 0; j < chunk.length; j++) {
+            const d = chunk[j];
+            const name = esc(customNames[d.mac] || d.name || d.ip);
+            const vendor = esc(d.vendor || 'Unknown');
+            const type = esc(d.deviceType || 'PC');
+            
+            msg += `🔹 <b>${name}</b> (${d.ip})\n`;
+            msg += `   └ 🏭 ${vendor} | 🖥️ ${type} | 🔗 ${d.mac.substring(0, 8)}\n`;
+        }
+
+        for (const id of chatIds) {
+            try {
+                await bot.sendMessage(id, msg, { parse_mode: 'HTML' });
+            } catch (err) { }
+        }
     }
 }
 
@@ -259,4 +376,4 @@ function stop() {
     if (bot) bot.stopPolling();
 }
 
-module.exports = { start, stop, sendAlert };
+module.exports = { start, stop, sendAlert, sendScanReport };

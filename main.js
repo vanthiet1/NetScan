@@ -25,6 +25,8 @@ const bonjourNames = {};
 let mainWindow;
 let isScanning = false;
 let backgroundScanInterval;
+let latencyPingInterval;
+let knownOnlineIPs = new Set();
 
 async function performBackgroundScan() {
     if (isScanning) return;
@@ -39,6 +41,8 @@ async function performBackgroundScan() {
             name: (!d.name || d.name === '?') ? d.ip : d.name,
             online: true
         }));
+        
+        devices.forEach(d => knownOnlineIPs.add(d.ip));
         
         // Update tracker and get changes
         deviceTracker.updateDevices(devices).then(changes => {
@@ -221,7 +225,7 @@ async function getDeviceName(ip, mac) {
 
         // Fallback: MAC OUI vendor
         const vendor = await getVendor(mac);
-        if (vendor && vendor !== 'Unknown') return vendor + ' Device';
+        if (vendor && vendor !== 'Unknown' && vendor !== 'Network Device') return `Thiết bị ${vendor}`;
 
         return ip;
     } catch (e) {
@@ -300,6 +304,8 @@ ipcMain.handle('scan-network', async (event) => {
 
     await Promise.all(tasks);
     isScanning = false;
+    
+    devices.forEach(d => knownOnlineIPs.add(d.ip));
 
     // Track devices and get changes for alerts
     deviceTracker.updateDevices(devices).then(changes => {
@@ -312,6 +318,16 @@ ipcMain.handle('scan-network', async (event) => {
     });
 
     return { success: true, devices };
+});
+
+ipcMain.handle('send-scan-report', async (event, devices) => {
+    try {
+        await telegramBot.sendScanReport(devices);
+        return { success: true };
+    } catch (err) {
+        console.error('Telegram report error:', err);
+        return { success: false, error: err.message };
+    }
 });
 
 ipcMain.handle('send-notification', (event, { title, body }) => {
@@ -357,16 +373,23 @@ ipcMain.handle('get-device-info', async (event, { ip, mac, name }) => {
         };
         
         const services = [];
-        for (const [port, serviceName] of Object.entries(commonPorts)) {
-            if (await checkPort(ip, parseInt(port))) {
+        const portPromises = Object.entries(commonPorts).map(async ([portStr, serviceName]) => {
+            const port = parseInt(portStr);
+            if (await checkPort(ip, port)) {
                 let extra = '';
-                if (port === '80' || port === '443' || port === '8080') {
-                    const title = await getHttpTitle(ip, parseInt(port));
+                if (port === 80 || port === 443 || port === 8080) {
+                    const title = await getHttpTitle(ip, port);
                     if (title) extra = ` (${title})`;
                 }
-                services.push({ port: parseInt(port), service: serviceName + extra });
+                return { port, service: serviceName + extra };
             }
-        }
+            return null;
+        });
+        
+        const resolvedPorts = await Promise.all(portPromises);
+        resolvedPorts.forEach(res => {
+            if (res) services.push(res);
+        });
 
         const reverseDns = await getHostname(ip);
         const osGuessed = await guessOS(ip);
@@ -412,22 +435,52 @@ app.whenReady().then(async () => {
     createWindow();
 
     // Start MongoDB tracker (async, don't block)
+    console.log('[App] Initializing Database Connection...');
     const dbOk = await deviceTracker.connect();
-    if (!dbOk) {
-        console.warn('[App] MongoDB failed - Usage history will not be saved, but real-time alerts are ACTIVE');
+    if (dbOk) {
+        console.log('✅ [App] MongoDB Connected Successfully! Usage history and stats are now active.');
+    } else {
+        console.warn('❌ [App] MongoDB Connection Failed - History tracking is DISABLED.');
+        console.warn('   (Tip: Please check your IP Whitelist in MongoDB Atlas dashboard)');
     }
 
     // Always start Telegram bot and background scanning
     telegramBot.start();
     console.log('[App] Telegram bot started');
     
-    // Start background scanning for tracking (every 1 minute)
+    // Start background scanning for tracking (every 30 seconds)
     performBackgroundScan(); // Run once immediately
-    backgroundScanInterval = setInterval(performBackgroundScan, 1 * 60 * 1000);
+    backgroundScanInterval = setInterval(performBackgroundScan, 30 * 1000);
+
+    // Start Real-time Latency Ping Loop (every 5 seconds)
+    latencyPingInterval = setInterval(async () => {
+        if (!mainWindow || knownOnlineIPs.size === 0) return;
+        const updates = {};
+        const ipsToPing = Array.from(knownOnlineIPs);
+        
+        await Promise.all(ipsToPing.map(async (ip) => {
+            try {
+                const res = await ping.promise.probe(ip, { timeout: 1 });
+                if (res.alive) {
+                    updates[ip] = res.time !== 'unknown' ? parseFloat(res.time) : 1;
+                } else {
+                    updates[ip] = null;
+                    knownOnlineIPs.delete(ip); // remove if dead
+                }
+            } catch (e) {
+                updates[ip] = null;
+            }
+        }));
+        
+        if (Object.keys(updates).length > 0 && mainWindow) {
+            mainWindow.webContents.send('latency-update', updates);
+        }
+    }, 5000);
 });
 
 app.on('window-all-closed', () => {
     telegramBot.stop();
     if (backgroundScanInterval) clearInterval(backgroundScanInterval);
+    if (latencyPingInterval) clearInterval(latencyPingInterval);
     if (process.platform !== 'darwin') app.quit();
 });

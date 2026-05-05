@@ -84,10 +84,34 @@ const formatDuration = (ms) => {
   return `${hours} giờ ${minutes} phút`;
 };
 
+const MDNS_LABELS = {
+  model: 'Dòng máy (Model)',
+  deviceid: 'ID định danh thiết bị',
+  srcvers: 'Phiên bản phần mềm',
+  features: 'Tính năng hỗ trợ',
+  flags: 'Cấu hình hệ thống (Flags)',
+  pk: 'Khóa bảo mật thiết bị',
+  pi: 'ID phiên bản duy nhất',
+  psi: 'ID dịch vụ kết nối',
+  protovers: 'Phiên bản giao thức',
+  at: 'Trạng thái hoạt động',
+  acl: 'Quyền truy cập (ACL)',
+  gid: 'ID nhóm thiết bị',
+  fex: 'Dữ liệu tính năng mở rộng',
+  rsf: 'Trạng thái nguồn điện',
+  ff: 'Cấu hình phần cứng',
+  cv: 'Phiên bản điều khiển',
+  st: 'Trạng thái hiện tại',
+  fn: 'Tên hiển thị (Friendly Name)',
+  md: 'Mô tả chi tiết',
+  ve: 'Phiên bản phần cứng'
+};
+
 // --- Main App Component ---
 const App = () => {
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [reportSent, setReportSent] = useState(true);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [lastScanTime, setLastScanTime] = useState(null);
@@ -160,12 +184,29 @@ const App = () => {
         });
         setLastScanTime(new Date().toLocaleTimeString());
       });
+
+      // Real-time latency update listener
+      window.electronAPI.onLatencyUpdate((updates) => {
+        setDevices(prev => prev.map(d => {
+          if (updates[d.ip] !== undefined) {
+            return { ...d, latency: updates[d.ip] };
+          }
+          return d;
+        }));
+        setSelectedDevice(prev => {
+          if (prev && updates[prev.ip] !== undefined) {
+            return { ...prev, latency: updates[prev.ip] };
+          }
+          return prev;
+        });
+      });
     }
   }, []);
 
   const scanNetwork = async () => {
     if (loading) return;
     setLoading(true);
+    setReportSent(false);
     setError(null);
     try {
       const data = await window.electronAPI.scanNetwork();
@@ -204,10 +245,10 @@ const App = () => {
         data.devices.forEach(d => {
           const pc = parentalControls[d.mac];
           if (pc && pc.enabled) {
-            const isRestricted = pc.after < pc.before 
+            const isRestricted = pc.after < pc.before
               ? (nowStr >= pc.after && nowStr <= pc.before)
               : (nowStr >= pc.after || nowStr <= pc.before);
-            
+
             if (isRestricted) {
               const lastNotified = notifiedRestrictions[d.mac] || 0;
               if (nowTs - lastNotified > 1800000) { // Notify once every 30 mins
@@ -321,6 +362,15 @@ const App = () => {
   useEffect(() => {
     const enrichNextDevice = async () => {
       const nextToEnrich = devices.find((d) => !d.enriched);
+
+      if (!nextToEnrich && !loading && devices.length > 0 && !reportSent) {
+        setReportSent(true);
+        if (window.electronAPI.sendScanReport) {
+          window.electronAPI.sendScanReport(devices).catch(console.error);
+        }
+        return;
+      }
+
       if (!nextToEnrich || loading) return;
 
       try {
@@ -331,13 +381,13 @@ const App = () => {
         });
         setDevices((prev) =>
           prev.map((d) =>
-            d.mac === nextToEnrich.mac 
-              ? { 
-                  ...d, 
-                  ...info,
-                  name: info.resolvedName && info.resolvedName !== d.ip ? info.resolvedName : d.name,
-                  enriched: true 
-                } 
+            d.mac === nextToEnrich.mac
+              ? {
+                ...d,
+                ...info,
+                name: info.resolvedName && info.resolvedName !== d.ip ? info.resolvedName : d.name,
+                enriched: true
+              }
               : d,
           ),
         );
@@ -430,7 +480,7 @@ const App = () => {
               Dừng quét
             </button>
           )}
-          <button className="btn-secondary" onClick={exportCSV}>
+          <button style={{ display: 'flex', alignItems: 'center', gap: '5px' }} className="btn-secondary" onClick={exportCSV}>
             <FileDown size={18} />
             Export CSV
           </button>
@@ -525,149 +575,149 @@ const App = () => {
 
         {activeTab === 'devices' && (
           <section className="table-container">
-          {error && (
-            <div className="error-state">
-              <AlertCircle size={40} color="#ef4444" />
-              <h3>Rất tiếc! Đã có lỗi xảy ra</h3>
-              <p>{error}</p>
-              <button className="btn-secondary" onClick={scanNetwork}>
-                Thử lại
-              </button>
-            </div>
-          )}
+            {error && (
+              <div className="error-state">
+                <AlertCircle size={40} color="#ef4444" />
+                <h3>Rất tiếc! Đã có lỗi xảy ra</h3>
+                <p>{error}</p>
+                <button className="btn-secondary" onClick={scanNetwork}>
+                  Thử lại
+                </button>
+              </div>
+            )}
 
-          {!error && !loading && devices.length === 0 && (
-            <div className="empty-state" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', placeItems: 'center', justifyContent: 'center', marginTop: '50px' }}>
-              <Monitor size={40} color="#64748b" />
-              <h3>Không tìm thấy thiết bị nào</h3>
-              <p>Nhấn nút "Quét mạng" để khám phá các thiết bị trong mạng nội bộ.</p>
-            </div>
-          )}
+            {!error && !loading && devices.length === 0 && (
+              <div className="empty-state" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', placeItems: 'center', justifyContent: 'center', marginTop: '50px' }}>
+                <Monitor size={40} color="#64748b" />
+                <h3>Không tìm thấy thiết bị nào</h3>
+                <p>Nhấn nút "Quét mạng" để khám phá các thiết bị trong mạng nội bộ.</p>
+              </div>
+            )}
 
-          {loading && devices.length === 0 && (
-            <div className="loading-state">
-              <h3 style={{ textAlign: "center", marginTop: '50px' }}>
-                Đang khám phá thiết bị...
-              </h3>
-            </div>
-          )}
+            {loading && devices.length === 0 && (
+              <div className="loading-state">
+                <h3 style={{ textAlign: "center", marginTop: '50px' }}>
+                  Đang khám phá thiết bị...
+                </h3>
+              </div>
+            )}
 
-          {devices.length > 0 && (
-            <>
-              <table className="devices-table">
-                <thead>
-                  <tr>
-                    <th>Thiết bị & Vendor</th>
-                    <th>Địa chỉ IP</th>
-                    <th>Hệ điều hành</th>
-                    <th>Latency</th>
-                    <th>Dịch vụ</th>
-                    <th className="action-col">Thao tác</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredDevices.map((device) => (
-                    <motion.tr
-                      key={device.mac}
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      className={`${newlyDetected.includes(device.mac) ? "new-device" : ""} ${lostDevices.includes(device.mac) ? "lost-device" : ""}`}
-                    >
-                      <td>
-                        <div className="device-info">
-                          <div className="device-icon">{getDeviceIcon(device, customNames)}</div>
-                          <div>
-                            <div
-                              className="device-name clickable"
-                              onDoubleClick={() => {
-                                const newName = prompt("Nhập tên gợi nhớ cho thiết bị:", customNames[device.mac] || device.name);
-                                if (newName !== null) handleRename(device.mac, newName);
-                              }}
-                            >
-                              {customNames[device.mac] || device.name}
-                              {device.hostname && <span className="hostname-text"> ({device.hostname})</span>}
-                              <Edit2 size={10} className="edit-hint" />
+            {devices.length > 0 && (
+              <>
+                <table className="devices-table">
+                  <thead>
+                    <tr>
+                      <th>Thiết bị & Vendor</th>
+                      <th>Địa chỉ IP</th>
+                      <th>Hệ điều hành</th>
+                      <th>Latency</th>
+                      <th>Dịch vụ</th>
+                      <th className="action-col">Thao tác</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredDevices.map((device) => (
+                      <motion.tr
+                        key={device.mac}
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className={`${newlyDetected.includes(device.mac) ? "new-device" : ""} ${lostDevices.includes(device.mac) ? "lost-device" : ""}`}
+                      >
+                        <td>
+                          <div className="device-info">
+                            <div className="device-icon">{getDeviceIcon(device, customNames)}</div>
+                            <div>
+                              <div
+                                className="device-name clickable"
+                                onDoubleClick={() => {
+                                  const newName = prompt("Nhập tên gợi nhớ cho thiết bị:", customNames[device.mac] || device.name);
+                                  if (newName !== null) handleRename(device.mac, newName);
+                                }}
+                              >
+                                {customNames[device.mac] || device.name}
+                                {device.hostname && <span className="hostname-text"> ({device.hostname})</span>}
+                                <Edit2 size={10} className="edit-hint" />
+                              </div>
+                              <div className="device-vendor-os">
+                                {device.enriched ? (
+                                  <span className="vendor-text">{device.vendor}</span>
+                                ) : (
+                                  <span className="enrich-loading">
+                                    <Loader2 size={10} className="spin" /> Đang cập nhật...
+                                  </span>
+                                )}
+                              </div>
                             </div>
-                            <div className="device-vendor-os">
-                              {device.enriched ? (
-                                <span className="vendor-text">{device.vendor}</span>
-                              ) : (
-                                <span className="enrich-loading">
-                                  <Loader2 size={10} className="spin" /> Đang cập nhật...
-                                </span>
-                              )}
-                            </div>
+                            {newlyDetected.includes(device.mac) && (
+                              <span className="badge-new">MỚI</span>
+                            )}
                           </div>
-                          {newlyDetected.includes(device.mac) && (
-                            <span className="badge-new">MỚI</span>
-                          )}
-                        </div>
-                      </td>
-                      <td><code>{device.ip}</code></td>
-                      <td>
-                        <div className="os-badge-wrapper">
-                          <span className="os-badge">{device.os || 'Unknown'}</span>
-                        </div>
-                      </td>
-                      <td>
-                        <div className="quality-cell">
-                          <div
-                            className="quality-dot live-dot"
-                            style={{ background: getQualityColor(device.latency) }}
-                          ></div>
-                          <span className="latency-text">
-                            {device.latency !== null ? `${device.latency}ms` : "N/A"}
-                          </span>
-                        </div>
-                      </td>
-                      <td>
-                        <div className="service-tags">
-                          {device.enriched ? (
-                            device.services?.slice(0, 3).map((s) => (
-                              <span key={s.port} className="service-tag">{s.service.split(' ')[0]}</span>
-                            ))
-                          ) : (
-                            <Loader2 size={14} className="spin text-muted" />
-                          )}
-                          {device.services?.length > 3 && <span className="service-tag">+{device.services.length - 3}</span>}
-                        </div>
-                      </td>
-                      <td className="action-col">
-                        <button
-                          className="btn-icon"
-                          onClick={() => setSelectedDevice(device)}
-                        >
-                          <ChevronRight size={18} />
-                        </button>
-                      </td>
-                    </motion.tr>
-                  ))}
-                </tbody>
-              </table>
+                        </td>
+                        <td><code>{device.ip}</code></td>
+                        <td>
+                          <div className="os-badge-wrapper">
+                            <span className="os-badge">{device.os || 'Unknown'}</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="quality-cell">
+                            <div
+                              className="quality-dot live-dot"
+                              style={{ background: getQualityColor(device.latency) }}
+                            ></div>
+                            <span className="latency-text">
+                              {device.latency != null ? `${device.latency}ms` : "N/A"}
+                            </span>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="service-tags">
+                            {device.enriched ? (
+                              device.services?.slice(0, 3).map((s) => (
+                                <span key={s.port} className="service-tag">{s.service.split(' ')[0]}</span>
+                              ))
+                            ) : (
+                              <Loader2 size={14} className="spin text-muted" />
+                            )}
+                            {device.services?.length > 3 && <span className="service-tag">+{device.services.length - 3}</span>}
+                          </div>
+                        </td>
+                        <td className="action-col">
+                          <button
+                            className="btn-icon"
+                            onClick={() => setSelectedDevice(device)}
+                          >
+                            <ChevronRight size={18} />
+                          </button>
+                        </td>
+                      </motion.tr>
+                    ))}
+                  </tbody>
+                </table>
 
-              {/* Mobile View */}
-              <div className="mobile-list">
-                {filteredDevices.map((device) => (
-                  <div key={`mob-${device.mac}`} className="device-card-mobile">
-                    <div className="device-card-header">
-                      <div className="device-icon">{getDeviceIcon(device)}</div>
-                      <div>
-                        <div className="device-name">{device.name}</div>
-                        <div className="device-vendor-os">{device.vendor}</div>
+                {/* Mobile View */}
+                <div className="mobile-list">
+                  {filteredDevices.map((device) => (
+                    <div key={`mob-${device.mac}`} className="device-card-mobile">
+                      <div className="device-card-header">
+                        <div className="device-icon">{getDeviceIcon(device)}</div>
+                        <div>
+                          <div className="device-name">{device.name}</div>
+                          <div className="device-vendor-os">{device.vendor}</div>
+                        </div>
+                      </div>
+                      <div className="device-card-meta">
+                        <span>{device.ip}</span>
+                        <span style={{ color: getQualityColor(device.latency) }}>
+                          {device.latency ? `${device.latency}ms` : 'N/A'}
+                        </span>
                       </div>
                     </div>
-                    <div className="device-card-meta">
-                      <span>{device.ip}</span>
-                      <span style={{ color: getQualityColor(device.latency) }}>
-                        {device.latency ? `${device.latency}ms` : 'N/A'}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </section>
+                  ))}
+                </div>
+              </>
+            )}
+          </section>
         )}
 
         {/* Usage Stats View */}
@@ -875,7 +925,7 @@ const App = () => {
                   <div className="section-header">
                     <h3>Hiệu năng & Kết nối</h3>
                     <span className="latency-badge" style={{ color: getQualityColor(selectedDevice.latency) }}>
-                      {selectedDevice.latency !== null ? `${selectedDevice.latency}ms` : 'Offline'}
+                      {selectedDevice.latency != null ? `${selectedDevice.latency}ms` : 'Offline'}
                     </span>
                   </div>
                 </div>
@@ -908,7 +958,7 @@ const App = () => {
                             <div className="bonjour-txt">
                               {Object.entries(b.txt).map(([k, v]) => (
                                 <div key={k} className="txt-item">
-                                  <strong>{k}:</strong> {String(v)}
+                                  <strong>{MDNS_LABELS[k] || k}:</strong> {String(v)}
                                 </div>
                               ))}
                             </div>
@@ -922,7 +972,7 @@ const App = () => {
                 {scanHistory[selectedDevice.mac] && (
                   <div className="detail-section">
                     <h3>Lịch sử hoạt động</h3>
-                    
+
                     {/* Single Device Gantt Chart */}
                     <div className="gantt-chart" style={{ marginBottom: '1.5rem', background: 'rgba(0,0,0,0.1)', padding: '1rem', borderRadius: '12px' }}>
                       <div className="gantt-row gantt-ruler">
@@ -985,15 +1035,40 @@ const App = () => {
                     </div>
 
                     <div className="history-timeline">
-                      {scanHistory[selectedDevice.mac].slice(-10).reverse().map((h, idx) => (
-                        <div key={idx} className="timeline-item">
-                          <div className={`timeline-dot ${h.event.toLowerCase()}`}></div>
-                          <div className="timeline-content">
-                            <span className="timeline-event">{h.event}</span>
-                            <span className="timeline-time">{h.time}</span>
+                      {(() => {
+                        const history = scanHistory[selectedDevice.mac] || [];
+                        if (history.length === 0) return <p className="text-muted">Chưa có lịch sử hoạt động.</p>;
+
+                        // Group by date
+                        const groups = {};
+                        history.forEach(h => {
+                          const d = h.time.split(' ')[0];
+                          if (!groups[d]) groups[d] = [];
+                          groups[d].push(h);
+                        });
+
+                        return Object.entries(groups).reverse().slice(0, 3).map(([date, items], gIdx) => (
+                          <div key={gIdx} className="history-group">
+                            <div className="history-date-header">{date === new Date().toLocaleDateString('vi-VN') ? 'Hôm nay' : date}</div>
+                            <div className="history-items">
+                              {items.reverse().map((h, idx) => (
+                                <div key={idx} className="timeline-item">
+                                  <div className={`timeline-dot ${h.event.toLowerCase()}`}></div>
+                                  <div className="timeline-content">
+                                    <div className="timeline-main">
+                                      <span className="timeline-event">
+                                        <b>{customNames[selectedDevice.mac] || selectedDevice.name || selectedDevice.ip}</b>: {h.event === 'Online' ? 'Kết nối' : 'Mất kết nối'}
+                                      </span>
+                                      <span className="timeline-time">{h.time.split(' ')[1]}</span>
+                                    </div>
+                                    <div className="timeline-connector"></div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        ));
+                      })()}
                     </div>
                   </div>
                 )}
@@ -1001,13 +1076,13 @@ const App = () => {
                 {/* Parental Control Section */}
                 <div className="detail-section">
                   <div className="section-header">
-                    <h3><Clock size={14} style={{display:'inline',marginRight:'0.4rem'}}/>Điều khiển phụ huynh</h3>
+                    <h3><Clock size={14} style={{ display: 'inline', marginRight: '0.4rem' }} />Điều khiển phụ huynh</h3>
                     <label className="pc-toggle">
                       <input
                         type="checkbox"
                         checked={parentalControls[selectedDevice.mac]?.enabled || false}
                         onChange={(e) => toggleParentalControl(selectedDevice.mac, {
-                          ...( parentalControls[selectedDevice.mac] || { after: '22:00', before: '06:00' }),
+                          ...(parentalControls[selectedDevice.mac] || { after: '22:00', before: '06:00' }),
                           enabled: e.target.checked
                         })}
                       />
@@ -1048,7 +1123,7 @@ const App = () => {
                         <div className="pc-stat">
                           <span>Tổng phiên hôm nay</span>
                           <strong>{scanHistory[selectedDevice.mac]?.filter(e => {
-                            const today = new Date(); today.setHours(0,0,0,0);
+                            const today = new Date(); today.setHours(0, 0, 0, 0);
                             return e.ts >= today.getTime() && e.event === 'Online';
                           }).length || 0} phiên</strong>
                         </div>
